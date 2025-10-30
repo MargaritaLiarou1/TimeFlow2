@@ -13,8 +13,6 @@ class InitialBackboneTimeSeries:
 
         self.initial_pathway_groups = initial_pathway_groups
         self.indices_dict = indices_dict
-
-        # squared pairwise distance matrix for clustering paths and
         self.df = df
         self.backtracked_paths = backtracked_paths
         self.group_time_series = None
