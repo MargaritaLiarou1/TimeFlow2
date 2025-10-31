@@ -685,3 +685,203 @@ def merge_groups_by_cluster(summary_df, refined_groups_dfs):
         # })
 
     return merged_dict, celltype_stats
+
+
+########################################### utils for TimeFlow 2-FlowSOM variant ###########################################
+
+def build_segment_cluster_arrays(state_results):
+    # subsets of original dataset per segment
+    segment_datasets = state_results["segment_datasets"]
+    # cluster ids for data in each segment
+    cluster_results = state_results["cluster_results"]
+
+    final_dict = {}
+
+    for seg_name, df in segment_datasets.items():
+
+        if isinstance(seg_name, int):
+            seg_key = f"S{seg_name}"
+        else:
+            seg_key = seg_name
+
+        # cluster labels for segment in loop
+        cluster_labels = cluster_results.get(seg_key, {}).get("cluster_labels")
+        if cluster_labels is None:
+            continue
+
+        # numpy df subsets
+        df_np = df.to_numpy()
+        segment_clusters = {}
+
+        # match data rows for each cluster id
+        for clust_id in np.unique(cluster_labels):
+            mask = cluster_labels == clust_id
+            segment_clusters[int(clust_id)] = df_np[mask]
+
+        final_dict[seg_key] = segment_clusters
+
+    return final_dict
+
+
+def sinkhorn_distance_batched_version(X_i, X_j, a=None, b=None, reg=1e-1, batch_size=2048):
+    # entropic regularization of OT to use for FlowSOM clusters
+    n_i, n_j = X_i.shape[0], X_j.shape[0]
+    # uniform weights
+    if a is None:
+        a = np.ones(n_i) / n_i
+    if b is None:
+        b = np.ones(n_j) / n_j
+
+    # create batches
+    batches_i = [(k, min(k + batch_size, n_i)) for k in range(0, n_i, batch_size)]
+    batches_j = [(k, min(k + batch_size, n_j)) for k in range(0, n_j, batch_size)]
+
+    total_distance = 0.0
+    total_weight = 0.0
+
+    for (i_start, i_end) in batches_i:
+        X_ib = X_i[i_start:i_end]
+        a_b = np.ones(i_end - i_start) / (i_end - i_start)
+
+        for (j_start, j_end) in batches_j:
+            X_jb = X_j[j_start:j_end]
+            b_b = np.ones(j_end - j_start) / (j_end - j_start)
+
+            # cost matrix
+            M = ot.dist(X_ib, X_jb, metric="sqeuclidean")
+            # https://pythonot.github.io/all.html#ot.sinkhorn2
+            dist = ot.sinkhorn2(a_b, b_b, M, reg)
+            # weights by batch size
+            w = (i_end - i_start) * (j_end - j_start)
+            total_distance += dist * w
+            total_weight += w
+
+    return total_distance / total_weight
+
+
+def ot_plans_Sinkhorn_FlowSOM(segment, clusters, reg=1e-1, batch_size=2048):
+    # regularized, batched OT plans as above between pairs of FlowSOM clusters in each segment
+    cluster_ids = list(clusters.keys())
+    ot_distances_segment = {}
+
+    for i, cluster_i in enumerate(cluster_ids):
+        X_i = clusters[cluster_i]
+        for j in range(i, len(cluster_ids)):
+            X_j = clusters[cluster_ids[j]]
+
+            # batched Sinkhorn
+            distance = sinkhorn_distance_batched_version(X_i, X_j, reg=reg, batch_size=batch_size)
+            # symmetric distances
+            ot_distances_segment[(cluster_i, cluster_ids[j])] = distance
+            ot_distances_segment[(cluster_ids[j], cluster_i)] = distance
+
+            print(f"Segment: {segment}, Cluster {cluster_i} vs Cluster {cluster_ids[j]}, "
+                  f"Batched Sinkhorn distance: {distance:.4f}")
+
+    return segment, ot_distances_segment
+
+
+def compute_cluster_correlation_similarity_percentile_FlowSOM(result, cell_indices, time_series_per_path=None,
+                                                              high_corr_guard=0.9, pearson_corr_threshold=0.85,
+                                                              percentile_10_threshold=0.75):
+    # cluster correlation similarity thresholds, same logic as in TimeFlow 2-GMM variant
+    # separate between leaf clusters whose similarity is below and above the Pearson correlation threshold (fixed default value at 0.85)
+    # decrease threshold to 0.75 if the 10th percentile of all correlation scores is above 0.85, pass if all individual correlation scores above 0.9
+    similarities = {}
+    merge_pairs = {}
+    low_corr_only_sources = {}
+
+    all_corrs = []
+    for segment, cluster_links in result.items():
+        for source_cluster, target_clusters in cluster_links.items():
+            for target_cluster in target_clusters:
+                source_key = f"{source_cluster}_segment_{segment.replace('segment_', 'S')}"
+                target_key = f"{target_cluster}_segment_{segment.replace('segment_', 'S')}"
+                if source_key in time_series_per_path and target_key in time_series_per_path:
+                    corr = path_correlation(time_series_per_path[source_key], time_series_per_path[target_key])
+                    if corr is not None:
+                        all_corrs.append(corr)
+
+    if not all_corrs:
+        threshold = pearson_corr_threshold
+    else:
+        perc10 = np.percentile(all_corrs, 10)
+        threshold = percentile_10_threshold if perc10 >= pearson_corr_threshold else pearson_corr_threshold
+    print(f"🔹 Global 10th percentile = {perc10:.3f} → threshold = {threshold:.2f}")
+
+    for segment, cluster_links in result.items():
+        similarities[segment] = {}
+        merge_pairs[segment] = {}
+        low_corr_only_sources[segment] = []
+
+        for source_cluster, target_clusters in cluster_links.items():
+            similarities[segment][source_cluster] = {}
+            above_count = 0
+
+            for target_cluster in target_clusters:
+                source_key = f"{source_cluster}_segment_{segment.replace('segment_', 'S')}"
+                target_key = f"{target_cluster}_segment_{segment.replace('segment_', 'S')}"
+
+                if source_key in time_series_per_path and target_key in time_series_per_path:
+                    corr = path_correlation(time_series_per_path[source_key], time_series_per_path[target_key])
+                    if corr is None:
+                        continue
+
+                    similarities[segment][source_cluster][target_cluster] = corr
+
+                    # pass correlations above 0.9
+                    if corr >= threshold or corr >= high_corr_guard:
+                        merge_pairs[segment].setdefault(source_cluster, []).append(target_cluster)
+                        status = "Above threshold"
+                        above_count += 1
+                    else:
+                        status = "Below threshold"
+
+                    print(f"{source_key} ↔ {target_key}: corr={corr:.3f} → {status}")
+
+            if target_clusters and above_count == 0:
+                low_corr_only_sources[segment].append(f"{source_cluster}_segment_{segment.replace('segment_', 'S')}")
+
+    print("\n Source clusters with only below-threshold correlations:")
+    for segment, clusters in low_corr_only_sources.items():
+        print(f"{segment}: {clusters}")
+
+    return similarities, merge_pairs, threshold, low_corr_only_sources
+
+
+def matching_sources_FlowSOM(top_N_results, group_unique_cluster_segments):
+    # for leaf clusters with unexplored closest target clusters
+    # collect all targets across all N levels
+    segment_source_targets = defaultdict(lambda: defaultdict(set))
+
+    for top_n, segments in top_N_results.items():
+        for segment, source_targets in segments.items():
+            for source, targets in source_targets.items():
+                segment_source_targets[segment][source].update(targets)
+
+    flat_per_segment = {}
+
+    # filter for leaf targets
+    for segment, source_targets in segment_source_targets.items():
+        matching_sources = []
+        # change format as in GMM variant
+        segment_full = segment.replace('segment_', 'segment_S')
+
+        for source, targets in source_targets.items():
+            full_target_ids = [f"{target}_{segment_full}" for target in targets]
+
+            if all(full_id in group_unique_cluster_segments for full_id in full_target_ids):
+                matching_sources.append(source)
+
+        if matching_sources:
+            flat_per_segment[segment] = sorted(matching_sources)
+
+    formatted_source_list = []
+    for segment, clusters in flat_per_segment.items():
+        segment_x = segment.replace("segment_", "S")
+        for cluster in clusters:
+            formatted_id = f"{cluster}_segment_{segment_x}"
+            formatted_source_list.append(formatted_id)
+
+    return flat_per_segment, formatted_source_list
+
