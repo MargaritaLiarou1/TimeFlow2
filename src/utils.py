@@ -6,6 +6,7 @@ from sklearn.metrics.pairwise import euclidean_distances
 import itertools
 from scipy.spatial.distance import cdist
 from scipy.linalg import sqrtm
+import ot
 import re
 import matplotlib.pyplot as plt
 from sklearn.metrics import silhouette_score
