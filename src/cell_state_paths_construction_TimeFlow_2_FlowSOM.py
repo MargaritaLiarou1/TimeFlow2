@@ -4,6 +4,7 @@ from sklearn.preprocessing import MinMaxScaler
 import itertools
 import re
 import scanpy
+import ot
 import flowsom as fs
 import scanpy as sc
 
