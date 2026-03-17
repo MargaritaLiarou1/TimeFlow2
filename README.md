@@ -35,16 +35,15 @@ Python Package versions:
 Please contact us at *margarita.liarou@unige.ch* for any question about TimeFlow 2. 
 
 ##  Citation 
-The BibTeX for TimeFlow is the following:
+The BibTeX for TimeFlow 2 is the following:
 
 ```
-@article{liarou2025timeflow,
+@article{liarou2026timeflow,
   title={TimeFlow 2: an unsupervised cell lineage detection method for flow cytometry data},
   author={Liarou, Margarita and Matthes, Thomas and Marchand-Maillet, St{\'e}phane},
-  journal={bioRxiv},
-  pages={2025--11},
-  year={2025},
-  publisher={Cold Spring Harbor Laboratory}
+  journal={Cytometry Part A},
+  year={2026},
+  publisher={Wiley Online Library}
 }
 ```
 
